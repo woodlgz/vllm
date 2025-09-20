@@ -914,7 +914,7 @@ class Scheduler(SchedulerInterface):
             # Check for stop and update request status.
             if new_token_ids:
                 new_token_ids, stopped = self._update_request_with_output(
-                    request, new_token_ids)
+                    request, new_token_ids, scheduled_spec_token_ids)
 
             # Stop checking for pooler models.
             pooler_output = None
@@ -947,6 +947,7 @@ class Scheduler(SchedulerInterface):
 
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
+
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
@@ -1018,6 +1019,7 @@ class Scheduler(SchedulerInterface):
         self,
         request: Request,
         new_token_ids: list[int],
+        proposed_token_ids: list[int] = None,
     ) -> tuple[list[int], bool]:
         # Append generated tokens and check for stop. Note that if
         # a request is still being prefilled, we expect the model runner
