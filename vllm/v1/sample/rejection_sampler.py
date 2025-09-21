@@ -131,6 +131,43 @@ class RejectionSampler(nn.Module):
         ]
         return outputs
 
+    @staticmethod
+    def get_last_valid_token(
+        output_token_ids: torch.Tensor,
+        vocab_size: int,
+    ) -> torch.Tensor :
+        # 返回值 last_sampled_id: [batch_size, 1] 每个请求采样token中的最后一个token
+        mask = (output_token_ids != PLACEHOLDER_TOKEN_ID) & (output_token_ids < vocab_size)
+        idx = (torch.sum(mask, dim = -1) - 1).unsqueeze(-1)
+        idx = torch.maximum(idx, torch.zeros_like(idx))
+        return torch.gather(output_token_ids, -1, idx)
+
+    @staticmethod
+    def get_num_rejected_tokens(
+        output_token_ids: torch.Tensor,
+        num_draft_tokens: torch.Tensor
+    ) -> torch.Tensor :
+        # 返回值 last_sampled_id: [batch_size, 1] 每个请求采样token中的最后一个token
+        mask = (output_token_ids != PLACEHOLDER_TOKEN_ID) & (output_token_ids < vocab_size)
+        num_sampled_tokens = torch.sum(mask, dim = -1, dtype = torch.int32)
+        num_rejected_tokens = torch.maximum(num_draft_tokens + 1 - num_sampled_tokens, 
+                               torch.zeros_like(num_sampled_tokens))
+        return num_rejected_tokens
+
+    @staticmethod
+    def get_last_valid_token_and_rejected_num(
+        output_token_ids: torch.Tensor,
+        num_draft_tokens: torch.Tensor,
+        vocab_size: int,
+    ) -> tuple(torch.Tensor, torch.Tensor):
+        mask = (output_token_ids != PLACEHOLDER_TOKEN_ID) & (output_token_ids < vocab_size)
+        num_sampled_tokens = torch.sum(mask, dim = -1, dtype = torch.int32)
+        zeros = torch.zeros_like(num_sampled_tokens)
+        idx = (num_sampled_tokens - 1).unsqueeze(-1)
+        idx = torch.maximum(idx, zeros)
+        last_valid_token_ids = torch.gather(output_token_ids, -1, idx)
+        num_rejected_tokens = torch.maximum(num_draft_tokens + 1 - num_sampled_tokens, zeros)
+        return last_valid_token_ids, num_rejected_tokens
 
 def rejection_sample(
     # [num_tokens]

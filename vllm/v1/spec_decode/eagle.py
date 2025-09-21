@@ -56,6 +56,7 @@ class EagleProposer:
         self.speculative_config = vllm_config.speculative_config
         self.draft_model_config = self.speculative_config.draft_model_config
         self.method = self.speculative_config.method
+        self.device = device
 
         self.runner = runner
         self.dtype = vllm_config.model_config.dtype
@@ -158,10 +159,12 @@ class EagleProposer:
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
         mm_embeds: Optional[list[torch.Tensor]] = None,
+        last_token_indices: Optional[list[torch.Tensor]] = None
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
-        last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
+        if last_token_indices is None:
+            last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
 
         if self.method == "eagle3":
             assert isinstance(self.model, Eagle3LlamaForCausalLM)
@@ -511,8 +514,9 @@ class EagleProposer:
         self,
         common_attn_metadata: CommonAttentionMetadata,
         # [batch_size]
-        num_rejected_tokens: torch.Tensor
-    ) -> tuple[CommonAttentionMetadata, torch.Tensor]:
+        num_rejected_tokens: torch.Tensor,
+        padding_no_reject: bool = False
+    ) -> tuple[CommonAttentionMetadata, torch.Tensor, torch.Tensor]:
         """
         This function is used to prepare the inputs for the spec decode.
         It updates to the common_attn_metadata to account for the rejected
@@ -535,18 +539,39 @@ class EagleProposer:
         #                 q1, q1 + 1, ..., q1 + q2 - n2 - 1,
         #                 q1 + q2, q1 + q2 + 1, ..., q1 + q2 + q3 - n3 - 1]
 
-        device = common_attn_metadata.query_start_loc.device
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+        if padding_no_reject:
+            # 如果拿bonus token/last valid token 跑第一次draft model,
+            # 由于不知道本次实际的num_accepted_tokens, 没法得知正确的cpu信息，
+            # 如seq_lens_cpu、max_seq_len、max_query_len等, 构建draft model
+            # 的attention meta会出错。方便起见，假设上次proposed的draft tokens
+            # 接受率为100%。
+            # num_speculative_tokens
+            # new_seq_lens_device: 请求中当前seq_len，包含已经计算的tokens
+            # new_query_len_per_req: draft model输入的新的seqlen
+            # new_query_start_loc: draft model输入的query_start_loc
+            # let'say num_speculative_tokens = 3
+            # [must_token, draft1, draft2, draft3]
+            # actual rejected draft2, draft3, but we won't know until device sync
+            # we still assume all are accepted, so we will have a fake bonus token
+            # first drafting input will be [draft1, draft2, draft3, fake_bonus]
+            # 
+            num_rejected_tokens_backup = num_rejected_tokens
+            num_rejected_tokens = torch.zeros_like(
+                common_attn_metadata.seq_lens_cpu)
+        # 请求中当前seq_len，包含已经计算的tokens    
         new_seq_lens_cpu = common_attn_metadata.seq_lens_cpu \
-            - num_rejected_tokens
+            - num_rejected_tokens + 1
 
+        # draft model输入的新的seqlen
         # [0, q1, q1 + q2, q1 + q2 + q3] -> [q1, q2, q3]
         new_query_len_per_req = (query_start_loc_cpu[1:] -
-                                 query_start_loc_cpu[:-1])
+                                query_start_loc_cpu[:-1])
         # [q1, q2, q3] -> [q1 - n1, q2 - n2, q3 - n3]
         new_num_tokens_per_req = new_query_len_per_req - num_rejected_tokens
         new_num_tokens_per_req_np = new_num_tokens_per_req.numpy()
 
+        # draft model输入的query_start_loc
         # [q1 - n1, q2 - n2, q3 - n3] ->
         # [0, q1 - n1, q1 + q2 - n1 - n2, q1 + q2 + q3 - n1 - n2 - n3]
         new_query_start_loc_cpu = torch.zeros(
@@ -555,7 +580,8 @@ class EagleProposer:
             pin_memory=is_pin_memory_available())
         new_query_start_loc_np = new_query_start_loc_cpu.numpy()
         np.cumsum(new_num_tokens_per_req_np, out=new_query_start_loc_np[1:])
-
+        
+        # draft model 输入的总token数
         total_num_tokens = new_query_start_loc_np[-1]
         # Example assuming num_tokens_per_req_np = [2, 4, 3]
         # this implies that `new_query_start_locs` is:
@@ -563,7 +589,7 @@ class EagleProposer:
         # [0, 0, 2, 2, 2, 2, 6, 6, 6]
         #  _r1_  ____r2____  ___r3__
         new_query_start_locs_expanded = np.repeat(new_query_start_loc_np[:-1],
-                                                  new_num_tokens_per_req_np)
+                                                new_num_tokens_per_req_np)
         # [0, 1, 2, 3, 4, 5, 6, 7, 8] ->
         # [0, 1, 0, 1, 2, 3, 0, 1, 2]
         #  _r1_  ____r2____  ___r3__
@@ -581,13 +607,14 @@ class EagleProposer:
         #  q1 + 0, q1 + 1, q1 + 2, q1 + 3,       // req 2
         #  q1 + q2 + 0, q1 + q2 + 1, q1 + q2 + 2] // req 3
         token_indices_np = token_offests + old_query_start_locs_expanded
+        # draft model输入token在原来input_ids中的索引
         token_indices = torch.from_numpy(token_indices_np).to(
-            device, non_blocking=True)
+            self.device, non_blocking=True)
 
         spec_common_attn_metadata = CommonAttentionMetadata(
-            query_start_loc=new_query_start_loc_cpu.to(device,
-                                                       non_blocking=True),
-            seq_lens=new_seq_lens_cpu.to(device, non_blocking=True),
+            query_start_loc=new_query_start_loc_cpu.to(self.device,
+                                                    non_blocking=True),
+            seq_lens=new_seq_lens_cpu.to(self.device, non_blocking=True),
             query_start_loc_cpu=new_query_start_loc_cpu,
             seq_lens_cpu=new_seq_lens_cpu,
             num_computed_tokens_cpu=common_attn_metadata.
@@ -600,8 +627,11 @@ class EagleProposer:
             slot_mapping=common_attn_metadata.slot_mapping[token_indices],
             causal=True,
         )
-
-        return spec_common_attn_metadata, token_indices
+        last_token_indices = None
+        if padding_no_reject:
+            last_token_indices = \
+                spec_common_attn_metadata.query_start_loc[1:] - 1 - num_rejected_tokens_backup
+        return spec_common_attn_metadata, token_indices, last_token_indices
 
     def load_model(self, target_model: nn.Module) -> None:
         draft_model_config = \

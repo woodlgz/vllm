@@ -276,6 +276,8 @@ class Scheduler(SchedulerInterface):
                         preempted_req.record_event(
                             EngineCoreEventType.PREEMPTED, scheduled_timestamp)
 
+                    if self.scheduler_config.async_scheduling:
+                        preempted_req.spec_token_ids.clear()
                     self.waiting.prepend_request(preempted_req)
                     preempted_reqs.append(preempted_req)
                     if preempted_req == request:
