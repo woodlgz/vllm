@@ -52,8 +52,17 @@ def test_single_input_classification(server: RemoteOpenAIServer,
 
 
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-def test_multiple_inputs_classification(server: RemoteOpenAIServer,
-                                        model_name: str):
+def test_add_special_tokens_false(server: RemoteOpenAIServer, model_name: str):
+    response = requests.post(
+        server.url_for("classify"),
+        json={"model": model_name, "input": "hello", "add_special_tokens": False},
+    )
+    response.raise_for_status()
+    ClassificationResponse.model_validate(response.json())
+
+
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+def test_multiple_inputs_classification(server: RemoteOpenAIServer, model_name: str):
     input_texts = [
         "The product arrived on time and works perfectly",
         "I'm very satisfied with my purchase, would buy again",

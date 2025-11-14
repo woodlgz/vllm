@@ -7,7 +7,7 @@ import traceback
 from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
-from typing import Any, Callable, ClassVar, Generic, Optional, TypeVar, Union
+from typing import Any, Callable, ClassVar, Generic, Optional, TypeAlias, TypeVar, Union
 
 import torch
 from fastapi import Request
@@ -34,28 +34,37 @@ from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          resolve_chat_template_content_format)
 from vllm.entrypoints.context import ConversationContext
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              ChatCompletionResponse,
-                                              ClassificationRequest,
-                                              ClassificationResponse,
-                                              CompletionRequest,
-                                              CompletionResponse,
-                                              DetokenizeRequest,
-                                              EmbeddingChatRequest,
-                                              EmbeddingCompletionRequest,
-                                              EmbeddingRequest,
-                                              EmbeddingResponse, ErrorInfo,
-                                              ErrorResponse,
-                                              IOProcessorRequest,
-                                              PoolingResponse, RerankRequest,
-                                              ResponsesRequest, ScoreRequest,
-                                              ScoreResponse,
-                                              TokenizeChatRequest,
-                                              TokenizeCompletionRequest,
-                                              TokenizeResponse,
-                                              TranscriptionRequest,
-                                              TranscriptionResponse,
-                                              TranslationRequest)
+
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    ClassificationChatRequest,
+    ClassificationCompletionRequest,
+    ClassificationRequest,
+    ClassificationResponse,
+    CompletionRequest,
+    CompletionResponse,
+    DetokenizeRequest,
+    EmbeddingChatRequest,
+    EmbeddingCompletionRequest,
+    EmbeddingRequest,
+    EmbeddingResponse,
+    ErrorInfo,
+    ErrorResponse,
+    IOProcessorRequest,
+    PoolingResponse,
+    RerankRequest,
+    ResponsesRequest,
+    ScoreRequest,
+    ScoreResponse,
+    TokenizeChatRequest,
+    TokenizeCompletionRequest,
+    TokenizeResponse,
+    TranscriptionRequest,
+    TranscriptionResponse,
+    TranslationRequest,
+)
+
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser
 from vllm.entrypoints.renderer import (BaseRenderer, CompletionRenderer,
@@ -79,26 +88,31 @@ from vllm.utils import (AsyncMicrobatchTokenizer, is_list_of,
 
 logger = init_logger(__name__)
 
-CompletionLikeRequest = Union[
-    CompletionRequest,
-    DetokenizeRequest,
-    EmbeddingCompletionRequest,
-    RerankRequest,
-    ClassificationRequest,
-    ScoreRequest,
-    TokenizeCompletionRequest,
-]
 
-ChatLikeRequest = Union[ChatCompletionRequest, EmbeddingChatRequest,
-                        TokenizeChatRequest]
-SpeechToTextRequest = Union[TranscriptionRequest, TranslationRequest]
-AnyRequest = Union[
-    CompletionLikeRequest,
-    ChatLikeRequest,
-    SpeechToTextRequest,
-    ResponsesRequest,
-    IOProcessorRequest,
-]
+CompletionLikeRequest: TypeAlias = (
+    CompletionRequest
+    | DetokenizeRequest
+    | EmbeddingCompletionRequest
+    | RerankRequest
+    | ClassificationCompletionRequest
+    | ScoreRequest
+    | TokenizeCompletionRequest
+)
+
+ChatLikeRequest: TypeAlias = (
+    ChatCompletionRequest
+    | EmbeddingChatRequest
+    | TokenizeChatRequest
+    | ClassificationChatRequest
+)
+SpeechToTextRequest: TypeAlias = TranscriptionRequest | TranslationRequest
+AnyRequest: TypeAlias = (
+    CompletionLikeRequest
+    | ChatLikeRequest
+    | SpeechToTextRequest
+    | ResponsesRequest
+    | IOProcessorRequest
+)
 
 AnyResponse = Union[
     CompletionResponse,
@@ -542,9 +556,16 @@ class OpenAIServing:
         if not hasattr(request, "messages"):
             return message_types
 
-        for message in request.messages:
-            if (isinstance(message, dict) and "content" in message
-                    and isinstance(message["content"], list)):
+        messages = request.messages
+        if messages is None or isinstance(messages, (str, bytes)):
+            return message_types
+
+        for message in messages:
+            if (
+                isinstance(message, dict)
+                and "content" in message
+                and isinstance(message["content"], list)
+            ):
                 for content_dict in message["content"]:
                     if "type" in content_dict:
                         message_types.add(content_dict["type"].split("_")[0])
@@ -632,7 +653,8 @@ class OpenAIServing:
                 EmbeddingCompletionRequest,
                 ScoreRequest,
                 RerankRequest,
-                ClassificationRequest,
+                ClassificationCompletionRequest,
+                ClassificationChatRequest,
             ),
         ):
             # Note: input length can be up to the entire model context length
@@ -640,7 +662,8 @@ class OpenAIServing:
             if token_num > self.max_model_len:
                 operations: dict[type[AnyRequest], str] = {
                     ScoreRequest: "score",
-                    ClassificationRequest: "classification",
+                    ClassificationCompletionRequest: "classification",
+                    ClassificationChatRequest: "classification",
                 }
                 operation = operations.get(type(request),
                                            "embedding generation")
